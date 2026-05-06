@@ -22,24 +22,39 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-  /* Dark background */
-  .stApp { background-color: #0d1117; }
-  section[data-testid="stSidebar"] { background-color: #161b22; }
+  /* Light background */
+  .stApp { background-color: #ffffff; }
+  section[data-testid="stSidebar"] { background-color: #f5f5f5; }
+
+  /* All text black */
+  .stApp, .stApp p, .stApp span, .stApp div,
+  .stApp label, .stApp li, .stMarkdown { color: #111111 !important; }
 
   /* Metric cards */
   div[data-testid="metric-container"] {
-    background: #161b22;
-    border: 1px solid #30363d;
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
     border-radius: 8px;
     padding: 12px 16px;
   }
+  div[data-testid="metric-container"] * { color: #111111 !important; }
 
   /* Header */
-  h1 { color: #e6edf3 !important; letter-spacing: -0.5px; }
-  h2, h3 { color: #c9d1d9 !important; }
+  h1, h2, h3 { color: #111111 !important; letter-spacing: -0.5px; }
+
+  /* Caption */
+  .stCaptionContainer, .stCaptionContainer p { color: #555555 !important; }
 
   /* Dataframe tweaks */
   .stDataFrame { border-radius: 8px; overflow: hidden; }
+
+  /* Info box */
+  div[data-testid="stInfo"] { background: #e8f4fd; color: #111111 !important; }
+  div[data-testid="stInfo"] * { color: #111111 !important; }
+
+  /* Expander */
+  details { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; }
+  summary { color: #111111 !important; }
 
   /* Hide streamlit branding */
   #MainMenu { visibility: hidden; }
@@ -194,19 +209,19 @@ def build_chart(data):
     # SMA lines
     fig.add_trace(go.Scatter(
         x=df.index, y=df["SMA50"],
-        name="SMA 50", line=dict(color="#f0883e", width=1.2, dash="dot"),
+        name="SMA 50", line=dict(color="#e67e22", width=1.5, dash="dot"),
         hovertemplate="SMA50: ₹%{y:,.2f}<extra></extra>",
     ), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=df.index, y=df["SMA200"],
-        name="SMA 200", line=dict(color="#bc8cff", width=1.2, dash="dot"),
+        name="SMA 200", line=dict(color="#8e44ad", width=1.5, dash="dot"),
         hovertemplate="SMA200: ₹%{y:,.2f}<extra></extra>",
     ), row=1, col=1)
 
     # Price line (on top)
     fig.add_trace(go.Scatter(
         x=df.index, y=df["Close"],
-        name="Price", line=dict(color="#58a6ff", width=2),
+        name="Price", line=dict(color="#1a6faf", width=2),
         hovertemplate="₹%{y:,.2f}<extra>Price</extra>",
     ), row=1, col=1)
 
@@ -219,12 +234,12 @@ def build_chart(data):
     ), row=2, col=1)
     fig.add_trace(go.Scatter(
         x=df.index, y=df["MACD"],
-        name="MACD", line=dict(color="#58a6ff", width=1.2),
+        name="MACD", line=dict(color="#1a6faf", width=1.2),
         hovertemplate="%{y:.3f}<extra>MACD</extra>",
     ), row=2, col=1)
     fig.add_trace(go.Scatter(
         x=df.index, y=df["SignalLine"],
-        name="Signal", line=dict(color="#f0883e", width=1.2),
+        name="Signal", line=dict(color="#e67e22", width=1.2),
         hovertemplate="%{y:.3f}<extra>Signal</extra>",
     ), row=2, col=1)
     fig.add_hline(y=0, line_color="#30363d", line_width=1, row=2, col=1)
@@ -236,35 +251,36 @@ def build_chart(data):
     fig.add_hline(y=35, line_dash="dash", line_color="#2ecc71", line_width=1, row=3, col=1)
     fig.add_trace(go.Scatter(
         x=df.index, y=df["RSI"],
-        name="RSI", line=dict(color="#58a6ff", width=1.5),
+        name="RSI", line=dict(color="#1a6faf", width=1.5),
         hovertemplate="%{y:.1f}<extra>RSI</extra>",
     ), row=3, col=1)
 
     # ── Layout ────────────────────────────────────────────────────────────────
     fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor="#0d1117",
-        plot_bgcolor="#161b22",
+        template="plotly_white",
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#f8f9fa",
         height=680,
         margin=dict(l=10, r=10, t=60, b=10),
         title=dict(
             text=f"<b>{ticker}</b>   ₹{price:,.2f}   "
                  f"<span style='color:{SIG_COLOR[signal]}'>{signal}</span>",
-            font=dict(size=18, color="#e6edf3"),
+            font=dict(size=18, color="#111111"),
             x=0.01,
         ),
         legend=dict(
             orientation="h", x=0, y=1.02,
-            bgcolor="rgba(0,0,0,0)", font=dict(size=11),
+            bgcolor="rgba(0,0,0,0)", font=dict(size=11, color="#111111"),
         ),
         hovermode="x unified",
         xaxis_rangeslider_visible=False,
+        font=dict(color="#111111"),
     )
     # Consistent grid style across all subplots
     for i in range(1, 4):
-        fig.update_xaxes(showgrid=True, gridcolor="#21262d", gridwidth=0.5,
+        fig.update_xaxes(showgrid=True, gridcolor="#dee2e6", gridwidth=0.5,
                          zeroline=False, row=i, col=1)
-        fig.update_yaxes(showgrid=True, gridcolor="#21262d", gridwidth=0.5,
+        fig.update_yaxes(showgrid=True, gridcolor="#dee2e6", gridwidth=0.5,
                          zeroline=False, row=i, col=1)
     fig.update_yaxes(range=[0, 100], row=3, col=1)
 
