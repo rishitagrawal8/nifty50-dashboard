@@ -132,19 +132,36 @@ def calc_atr(df, period=14):
     return tr.rolling(period).mean()
 
 
-def calc_stop_target(price, atr, sma_fast, sma_slow):
+def calc_stop_target(df, price, atr, signal, interval):
     """
-    Stop loss  = price - 1.5 × ATR, floored at the nearest key SMA support.
-    Target     = price + 2 × (price - stop_loss)  →  2:1 reward:risk.
+    Stop  = recent swing low (last N bars), capped at 2×ATR below price.
+    Target = recent swing high (last N bars), minimum 1.5×R above price.
+    For SELL signals, flip: stop is recent swing HIGH, target is recent swing LOW.
     """
-    atr_stop  = round(price - 1.5 * atr, 2)
-    supports  = [s for s in [sma_fast, sma_slow] if s < price]
-    sma_floor = max(supports) if supports else atr_stop
-    stop      = round(max(atr_stop, sma_floor), 2)
-    risk      = price - stop
-    target    = round(price + 2 * risk, 2)
-    stop_pct   = round(-risk / price * 100, 1)
-    target_pct = round(2 * risk / price * 100, 1)
+    n = {"15m": 20, "1d": 14, "1wk": 20}.get(interval, 14)
+
+    recent_low  = round(df["Low"].iloc[-n:].min(),  2)
+    recent_high = round(df["High"].iloc[-n:].max(), 2)
+
+    if signal == "SELL":
+        # Short / exit view: danger level above, downside below
+        atr_stop   = round(price + 2 * atr, 2)
+        stop       = round(min(recent_high, atr_stop), 2)   # nearest resistance above
+        risk       = stop - price
+        min_target = round(price - 1.5 * risk, 2)
+        target     = round(min(recent_low, min_target), 2)  # nearest support below
+        stop_pct   = round((stop - price) / price * 100, 1)
+        target_pct = round((price - target) / price * 100, 1)
+    else:
+        # Long / buy view: support below, resistance above
+        atr_stop   = round(price - 2 * atr, 2)
+        stop       = round(max(recent_low, atr_stop), 2)    # nearest support below
+        risk       = price - stop
+        min_target = round(price + 1.5 * risk, 2)
+        target     = round(max(recent_high, min_target), 2) # nearest resistance above
+        stop_pct   = round(-risk / price * 100, 1)
+        target_pct = round((target - price) / price * 100, 1)
+
     return stop, target, stop_pct, target_pct
 
 
@@ -173,7 +190,7 @@ def fetch_single(ticker, cfg):
 
         atr_s  = calc_atr(df)
         atr    = round(float(atr_s.iloc[-1]), 2)
-        stop, target, stop_pct, target_pct = calc_stop_target(price, atr, sma_fast, sma_slow)
+        stop, target, stop_pct, target_pct = calc_stop_target(df, price, atr, signal, cfg["interval"])
 
         df = df.copy()
         df["SMAfast"] = close.rolling(fast).mean()
@@ -448,8 +465,12 @@ def render_indicator_breakdown(data):
     c2.metric("RSI (14)",       f"{rsi}")
     c3.metric(fl,               f"₹{sma_fast:,.0f}")
     c4.metric(sl,               f"₹{sma_slow:,.0f}")
-    c5.metric("Stop Loss",      f"₹{stop:,.2f}", delta=f"-{stop_pct:.1f}%", delta_color="inverse")
-    c6.metric("Target",         f"₹{target:,.2f}", delta=f"+{target_pct:.1f}%")
+    if sig == "SELL":
+        c5.metric("Danger Zone",    f"₹{stop:,.2f}",   delta=f"+{stop_pct:.1f}%")
+        c6.metric("Downside Target",f"₹{target:,.2f}", delta=f"-{target_pct:.1f}%", delta_color="inverse")
+    else:
+        c5.metric("Stop Loss",      f"₹{stop:,.2f}",   delta=f"{stop_pct:.1f}%",   delta_color="inverse")
+        c6.metric("Target",         f"₹{target:,.2f}", delta=f"+{target_pct:.1f}%")
 
     st.write("")
 
@@ -564,16 +585,26 @@ def render_indicator_breakdown(data):
 
     # ── Risk management ───────────────────────────────────────────────────────
     st.markdown("#### 🛡️ Risk management")
-    st.markdown(
-        f"- **Stop Loss at ₹{stop:,.2f}** ({stop_pct:.1f}% below current price)  \n"
-        f"  If the stock falls to this level, exit immediately. "
-        f"This is the point where the analysis is proven wrong and protecting your capital matters more than hoping for a recovery."
-    )
-    st.markdown(
-        f"- **Target at ₹{target:,.2f}** (+{target_pct:.1f}% from current price)  \n"
-        f"  This is the realistic upside based on current momentum — giving you a **2:1 reward-to-risk ratio**, "
-        f"meaning for every ₹1 you risk, the potential gain is ₹2."
-    )
+    if sig == "SELL":
+        st.markdown(
+            f"- **Danger zone above ₹{stop:,.2f}** (+{stop_pct:.1f}% from current price)  \n"
+            f"  This is the nearest resistance level. If the stock rallies back above this, the bearish case weakens — re-evaluate before shorting or holding a short position."
+        )
+        st.markdown(
+            f"- **Downside target ₹{target:,.2f}** (-{target_pct:.1f}% from current price)  \n"
+            f"  This is the nearest support level the stock could fall to. If you're holding this stock, this is a realistic exit point to watch."
+        )
+    else:
+        st.markdown(
+            f"- **Stop Loss at ₹{stop:,.2f}** ({stop_pct:.1f}% below current price)  \n"
+            f"  This is the most recent support level — the lowest price the stock has traded at recently. "
+            f"If it breaks below here, the buyers are no longer holding. Exit to protect your capital."
+        )
+        st.markdown(
+            f"- **Target at ₹{target:,.2f}** (+{target_pct:.1f}% from current price)  \n"
+            f"  This is the most recent resistance level — the highest price the stock has reached recently. "
+            f"Breaking above it cleanly would be a positive signal. This gives a **reward-to-risk ratio of at least 1.5:1**."
+        )
 
     st.divider()
 
