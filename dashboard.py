@@ -107,6 +107,37 @@ def get_signal(price, rsi, sma50, sma200, macd_hist):
     return "HOLD"
 
 
+def calc_atr(df, period=14):
+    h, l, c = df["High"], df["Low"], df["Close"]
+    tr = pd.concat([
+        h - l,
+        (h - c.shift()).abs(),
+        (l - c.shift()).abs(),
+    ], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
+
+
+def calc_stop_target(price, atr, sma50, sma200, signal):
+    """
+    Stop loss  = price - 1.5 × ATR, floored at the nearest key SMA support.
+    Target     = price + 2 × (price - stop_loss)  →  2:1 reward:risk.
+    """
+    atr_stop = round(price - 1.5 * atr, 2)
+
+    # Use the highest SMA that sits below price as a natural support floor
+    supports = [s for s in [sma50, sma200] if s < price]
+    sma_floor = max(supports) if supports else atr_stop
+
+    # Take the higher (tighter) of ATR stop and SMA floor
+    stop = round(max(atr_stop, sma_floor), 2)
+    risk = price - stop
+    target = round(price + 2 * risk, 2)
+
+    stop_pct   = round(-risk / price * 100, 1)
+    target_pct = round(2 * risk / price * 100, 1)
+    return stop, target, stop_pct, target_pct
+
+
 # ── Fetch ─────────────────────────────────────────────────────────────────────
 def fetch_single(ticker):
     try:
@@ -126,6 +157,10 @@ def fetch_single(ticker):
         macd_hist  = round(float(mh.iloc[-1]), 2)
         signal     = get_signal(price, rsi, sma50, sma200, macd_hist)
 
+        atr_s  = calc_atr(df)
+        atr    = round(float(atr_s.iloc[-1]), 2)
+        stop, target, stop_pct, target_pct = calc_stop_target(price, atr, sma50, sma200, signal)
+
         # Attach full series for charting
         df = df.copy()
         df["SMA50"]  = close.rolling(50).mean()
@@ -134,16 +169,21 @@ def fetch_single(ticker):
         df["MACD"], df["SignalLine"], df["Hist"] = calc_macd(close)
 
         return {
-            "ticker":    ticker,
-            "name":      ticker.replace(".NS", "").replace(".BO", ""),
-            "df":        df,
-            "price":     price,
-            "rsi":       rsi,
-            "sma50":     sma50,
-            "sma200":    sma200,
-            "macd_hist": macd_hist,
-            "vs200":     round((price - sma200) / sma200 * 100, 1),
-            "signal":    signal,
+            "ticker":     ticker,
+            "name":       ticker.replace(".NS", "").replace(".BO", ""),
+            "df":         df,
+            "price":      price,
+            "rsi":        rsi,
+            "sma50":      sma50,
+            "sma200":     sma200,
+            "macd_hist":  macd_hist,
+            "vs200":      round((price - sma200) / sma200 * 100, 1),
+            "signal":     signal,
+            "atr":        atr,
+            "stop":       stop,
+            "target":     target,
+            "stop_pct":   stop_pct,
+            "target_pct": target_pct,
         }
     except Exception:
         return None
@@ -226,6 +266,16 @@ def build_chart(data):
         hovertemplate="₹%{y:,.2f}<extra>Price</extra>",
     ), row=1, col=1)
 
+    # Stop loss and target lines
+    stop   = data["stop"]
+    target = data["target"]
+    fig.add_hline(y=stop,   line_dash="dash", line_color="#e74c3c", line_width=1.5,
+                  annotation_text=f"Stop ₹{stop:,.2f}", annotation_position="right",
+                  annotation_font_color="#e74c3c", row=1, col=1)
+    fig.add_hline(y=target, line_dash="dash", line_color="#27ae60", line_width=1.5,
+                  annotation_text=f"Target ₹{target:,.2f}", annotation_position="right",
+                  annotation_font_color="#27ae60", row=1, col=1)
+
     # ── MACD panel ────────────────────────────────────────────────────────────
     hist_colors = ["#2ecc71" if v >= 0 else "#e74c3c" for v in df["Hist"]]
     fig.add_trace(go.Bar(
@@ -298,10 +348,12 @@ def build_table(results):
             "Ticker":    d["name"],
             "Price (₹)": d["price"],
             "RSI":       d["rsi"],
-            "SMA 50":    d["sma50"],
-            "SMA 200":   d["sma200"],
             "vs SMA200": d["vs200"],
             "MACD Hist": d["macd_hist"],
+            "Stop Loss": d["stop"],
+            "SL %":      d["stop_pct"],
+            "Target":    d["target"],
+            "Tgt %":     d["target_pct"],
             "Signal":    SIGNAL_LABEL[d["signal"]],
         })
     return pd.DataFrame(rows)
@@ -353,10 +405,12 @@ def render_dashboard(results):
             "Ticker":    st.column_config.TextColumn("Ticker", width="small"),
             "Price (₹)": st.column_config.NumberColumn("Price (₹)", format="₹%.2f"),
             "RSI":       st.column_config.NumberColumn("RSI", format="%.1f"),
-            "SMA 50":    st.column_config.NumberColumn("SMA 50",  format="₹%.0f"),
-            "SMA 200":   st.column_config.NumberColumn("SMA 200", format="₹%.0f"),
             "vs SMA200": st.column_config.NumberColumn("vs SMA200", format="%.1f%%"),
             "MACD Hist": st.column_config.NumberColumn("MACD Hist", format="%.2f"),
+            "Stop Loss": st.column_config.NumberColumn("Stop Loss ₹", format="₹%.2f"),
+            "SL %":      st.column_config.NumberColumn("SL %", format="%.1f%%"),
+            "Target":    st.column_config.NumberColumn("Target ₹", format="₹%.2f"),
+            "Tgt %":     st.column_config.NumberColumn("Tgt %", format="+%.1f%%"),
             "Signal":    st.column_config.TextColumn("Signal", width="small"),
         },
     )
@@ -459,18 +513,31 @@ def render_portfolio(results):
         pnl_pct  = round((cur_price - buy_price) / buy_price * 100, 2) if buy_price > 0 else None
         rec      = portfolio_recommendation(d["signal"], pnl_pct)
 
+        stop       = d["stop"]
+        target     = d["target"]
+        risk_ps    = round(cur_price - stop, 2)
+        reward_ps  = round(target - cur_price, 2)
+        total_risk = round(risk_ps * shares, 2)
+        total_rwd  = round(reward_ps * shares, 2)
+
         r = {
-            "Ticker":          name,
-            "Shares":          shares,
-            "Current Price":   cur_price,
-            "Current Value":   cur_value,
-            "Signal":          SIGNAL_LABEL[d["signal"]],
-            "Action":          rec,
+            "Ticker":        name,
+            "Shares":        shares,
+            "Current Price": cur_price,
+            "Current Value": cur_value,
+            "Stop Loss":     stop,
+            "SL %":          d["stop_pct"],
+            "Target":        target,
+            "Tgt %":         d["target_pct"],
+            "Risk (₹)":      total_risk,
+            "Reward (₹)":    total_rwd,
+            "Signal":        SIGNAL_LABEL[d["signal"]],
+            "Action":        rec,
         }
         if has_buy_price:
-            r["Buy Price"]   = buy_price if buy_price > 0 else None
-            r["P&L (₹)"]    = pnl_amt
-            r["P&L (%)"]    = pnl_pct
+            r["Buy Price"] = buy_price if buy_price > 0 else None
+            r["P&L (₹)"]  = pnl_amt
+            r["P&L (%)"]  = pnl_pct
         rows.append(r)
 
     if not rows:
@@ -491,6 +558,12 @@ def render_portfolio(results):
         "Shares":        st.column_config.NumberColumn("Shares", format="%.0f"),
         "Current Price": st.column_config.NumberColumn("Current Price", format="₹%.2f"),
         "Current Value": st.column_config.NumberColumn("Current Value", format="₹%.2f"),
+        "Stop Loss":     st.column_config.NumberColumn("Stop Loss ₹", format="₹%.2f"),
+        "SL %":          st.column_config.NumberColumn("SL %", format="%.1f%%"),
+        "Target":        st.column_config.NumberColumn("Target ₹", format="₹%.2f"),
+        "Tgt %":         st.column_config.NumberColumn("Tgt %", format="+%.1f%%"),
+        "Risk (₹)":      st.column_config.NumberColumn("Total Risk ₹", format="₹%.0f"),
+        "Reward (₹)":    st.column_config.NumberColumn("Total Reward ₹", format="₹%.0f"),
         "Signal":        st.column_config.TextColumn("Signal"),
         "Action":        st.column_config.TextColumn("Action", width="large"),
     }
