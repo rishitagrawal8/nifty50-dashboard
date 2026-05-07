@@ -4,7 +4,6 @@
 import warnings
 warnings.filterwarnings("ignore")
 
-import json
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -399,6 +398,200 @@ def portfolio_recommendation(signal, pnl_pct):
     return "🟡 Hold — no clear direction yet"
 
 
+# ── News fetch ────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_news(ticker: str):
+    try:
+        items = yf.Ticker(ticker).news or []
+        out   = []
+        for n in items[:5]:
+            # yfinance v0.2.50+ wraps everything under n["content"]
+            c = n.get("content", n)
+            title = c.get("title", "")
+            link  = (c.get("canonicalUrl") or c.get("clickThroughUrl") or {}).get("url", "#")
+            src   = (c.get("provider") or {}).get("displayName", "")
+            pub   = c.get("pubDate", "")
+            try:
+                date_str = datetime.strptime(pub[:10], "%Y-%m-%d").strftime("%d %b") if pub else ""
+            except Exception:
+                date_str = ""
+            if title:
+                out.append({"title": title, "link": link, "source": src, "date": date_str})
+        return out
+    except Exception:
+        return []
+
+
+# ── Plain-English indicator breakdown ─────────────────────────────────────────
+
+def render_indicator_breakdown(data):
+    sig        = data["signal"]
+    price      = data["price"]
+    rsi        = data["rsi"]
+    sma_fast   = data["sma_fast"]
+    sma_slow   = data["sma_slow"]
+    fl         = data["sma_fast_label"]
+    sl         = data["sma_slow_label"]
+    stop       = data["stop"]
+    target     = data["target"]
+    stop_pct   = abs(data["stop_pct"])
+    target_pct = data["target_pct"]
+    macd_hist  = data["macd_hist"]
+    above_slow = price > sma_slow
+    above_fast = price > sma_fast
+    color      = SIG_COLOR[sig]
+
+    # ── Metrics row ───────────────────────────────────────────────────────────
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Current Price",  f"₹{price:,.2f}")
+    c2.metric("RSI (14)",       f"{rsi}")
+    c3.metric(fl,               f"₹{sma_fast:,.0f}")
+    c4.metric(sl,               f"₹{sma_slow:,.0f}")
+    c5.metric("Stop Loss",      f"₹{stop:,.2f}", delta=f"-{stop_pct:.1f}%", delta_color="inverse")
+    c6.metric("Target",         f"₹{target:,.2f}", delta=f"+{target_pct:.1f}%")
+
+    st.write("")
+
+    # ── Overall verdict ───────────────────────────────────────────────────────
+    if sig == "BUY":
+        verdict = (
+            f"**This stock looks like a buying opportunity right now.** "
+            f"It has pulled back to an oversold level — like a quality product on sale — "
+            f"while the long-term trend is still pointing upward. "
+            f"This combination often marks a good entry point."
+        )
+    elif sig == "SELL":
+        if rsi > 75 and not above_slow:
+            verdict = (
+                f"**This stock is flashing two warning signals at once.** "
+                f"It has risen too fast too soon (overbought) *and* has slipped below its long-term average. "
+                f"Consider exiting or reducing your position."
+            )
+        elif rsi > 75:
+            verdict = (
+                f"**This stock has rallied very hard, very quickly.** "
+                f"At an RSI of {rsi}, it's in 'overbought' territory — like a rubber band stretched too far. "
+                f"It may be due for a pullback. Avoid chasing it higher."
+            )
+        else:
+            verdict = (
+                f"**The long-term trend has turned negative.** "
+                f"The stock has dropped below its {sl} of ₹{sma_slow:,.0f}, which acts like the floor of the market. "
+                f"When a stock breaks this level, it often continues lower. Consider exiting."
+            )
+    else:
+        verdict = (
+            f"**No strong signal right now — best to hold and wait.** "
+            f"The stock is moving normally without any extreme buying or selling pressure. "
+            f"It's like waiting at a traffic signal — not the right moment to accelerate or brake hard."
+        )
+
+    st.markdown(f"### {SIGNAL_LABEL[sig]}  —  What this means")
+    st.markdown(f"<p style='font-size:16px'>{verdict}</p>", unsafe_allow_html=True)
+    st.divider()
+
+    # ── Detailed plain-English explanations ───────────────────────────────────
+    st.markdown("#### 📊 Breaking it down")
+
+    # RSI
+    if rsi < 35:
+        rsi_text = (
+            f"**Momentum (RSI {rsi}) — Oversold 🟢**  \n"
+            f"The RSI measures how fast a stock is moving. At {rsi}, it's below 35, which means "
+            f"the stock has been sold off heavily and is now in 'oversold' territory. "
+            f"Think of it like a spring compressed too far down — it often bounces back. "
+            f"This is typically a buying signal."
+        )
+    elif rsi > 75:
+        rsi_text = (
+            f"**Momentum (RSI {rsi}) — Overbought 🔴**  \n"
+            f"At {rsi}, the RSI is above 75, meaning the stock has been bought aggressively in a short time. "
+            f"Think of it like a rubber band stretched too far up — it tends to snap back. "
+            f"Buyers may start taking profits, pushing the price down."
+        )
+    else:
+        rsi_text = (
+            f"**Momentum (RSI {rsi}) — Neutral 🟡**  \n"
+            f"At {rsi}, the RSI sits comfortably between 35 and 75 — the 'neutral zone'. "
+            f"There's no extreme buying or selling pressure. "
+            f"The stock is simply moving normally, with neither bulls nor bears in full control."
+        )
+    st.markdown(rsi_text)
+
+    # SMA trend
+    if above_slow and above_fast:
+        sma_text = (
+            f"**Trend ({fl} & {sl}) — Uptrend 🟢**  \n"
+            f"At ₹{price:,.0f}, the stock is above both its short-term average (₹{sma_fast:,.0f}) "
+            f"and long-term average (₹{sma_slow:,.0f}). "
+            f"Think of these averages as the 'normal' price level. Being above both means "
+            f"the stock is trending healthily upward on both short and long timescales."
+        )
+    elif above_slow and not above_fast:
+        sma_text = (
+            f"**Trend ({fl} & {sl}) — Mixed ⚠️**  \n"
+            f"The stock has dipped below its short-term average (₹{sma_fast:,.0f}) but is still "
+            f"above its long-term average (₹{sma_slow:,.0f}). "
+            f"The big picture trend is intact, but there's short-term weakness — a yellow flag worth watching."
+        )
+    else:
+        sma_text = (
+            f"**Trend ({fl} & {sl}) — Downtrend 🔴**  \n"
+            f"At ₹{price:,.0f}, the stock has fallen below its long-term average of ₹{sma_slow:,.0f}. "
+            f"This long-term average acts like a floor — once a stock falls through it, "
+            f"it often continues lower. This is one of the strongest sell signals in technical analysis."
+        )
+    st.markdown(sma_text)
+
+    # MACD
+    if macd_hist > 0:
+        macd_text = (
+            f"**Momentum trend (MACD +{macd_hist}) — Building 🟢**  \n"
+            f"The MACD histogram is positive, meaning short-term buying pressure is picking up. "
+            f"Think of it as the wind moving in the right direction — it supports a move upward."
+        )
+    else:
+        macd_text = (
+            f"**Momentum trend (MACD {macd_hist}) — Fading 🔴**  \n"
+            f"The MACD histogram is negative, meaning short-term momentum is losing steam. "
+            f"Think of it as a car slowing down even before you see the brake lights — "
+            f"sellers are quietly gaining the upper hand."
+        )
+    st.markdown(macd_text)
+
+    st.divider()
+
+    # ── Risk management ───────────────────────────────────────────────────────
+    st.markdown("#### 🛡️ Risk management")
+    st.markdown(
+        f"- **Stop Loss at ₹{stop:,.2f}** ({stop_pct:.1f}% below current price)  \n"
+        f"  If the stock falls to this level, exit immediately. "
+        f"This is the point where the analysis is proven wrong and protecting your capital matters more than hoping for a recovery."
+    )
+    st.markdown(
+        f"- **Target at ₹{target:,.2f}** (+{target_pct:.1f}% from current price)  \n"
+        f"  This is the realistic upside based on current momentum — giving you a **2:1 reward-to-risk ratio**, "
+        f"meaning for every ₹1 you risk, the potential gain is ₹2."
+    )
+
+    st.divider()
+
+    # ── Latest news ───────────────────────────────────────────────────────────
+    st.markdown("#### 📰 Latest news")
+    ticker_full = data["ticker"]
+    with st.spinner("Fetching latest news …"):
+        news = fetch_news(ticker_full)
+
+    if news:
+        for item in news:
+            date_tag = f" · {item['date']}" if item["date"] else ""
+            src_tag  = f" · *{item['source']}*" if item["source"] else ""
+            st.markdown(f"- [{item['title']}]({item['link']}){date_tag}{src_tag}")
+    else:
+        st.caption("No recent news found for this stock.")
+
+
 def render_dashboard(results):
     counts = {"BUY": 0, "HOLD": 0, "SELL": 0}
     for d in results:
@@ -449,30 +642,7 @@ def render_dashboard(results):
         st.plotly_chart(build_chart(data), use_container_width=True)
 
         with st.expander("📊 Indicator breakdown", expanded=True):
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
-            c1.metric("Current Price",      f"₹{data['price']:,.2f}")
-            c2.metric("RSI (14)",           f"{data['rsi']}")
-            c3.metric(data["sma_fast_label"], f"₹{data['sma_fast']:,.0f}")
-            c4.metric(data["sma_slow_label"], f"₹{data['sma_slow']:,.0f}")
-            c5.metric("Stop Loss",          f"₹{data['stop']:,.2f}", delta=f"{data['stop_pct']}%", delta_color="inverse")
-            c6.metric("Target",             f"₹{data['target']:,.2f}", delta=f"+{data['target_pct']}%")
-
-            st.write("")
-            sig   = data["signal"]
-            color = SIG_COLOR[sig]
-            above = data["price"] > data["sma_slow"]
-            st.markdown(f"**Decision: <span style='color:{color}'>{SIGNAL_LABEL[sig]}</span>**", unsafe_allow_html=True)
-            if sig == "BUY":
-                st.markdown(f"- RSI **{data['rsi']}** < 35 → oversold territory")
-                st.markdown(f"- Price above **{data['sma_slow_label']}** ₹{data['sma_slow']:,} → uptrend intact")
-            elif sig == "SELL":
-                if data["rsi"] > 75:
-                    st.markdown(f"- RSI **{data['rsi']}** > 75 → overbought territory")
-                if not above:
-                    st.markdown(f"- Price below **{data['sma_slow_label']}** ₹{data['sma_slow']:,} → downtrend")
-            else:
-                st.markdown(f"- RSI **{data['rsi']}** in neutral zone (35–75)")
-                st.markdown(f"- Price is **{'above' if above else 'below'}** {data['sma_slow_label']} → awaiting clearer signal")
+            render_indicator_breakdown(data)
     else:
         st.info("👆 Click any row in the table above to view its price chart.", icon="📊")
 
