@@ -70,8 +70,8 @@ TIMEFRAMES = {
         "min_bars": 200, "desc": "Daily candles · holds days to weeks",
     },
     "🏦 Long Term": {
-        "period": "3y",  "interval": "1wk", "sma_fast": 50,  "sma_slow": 200,
-        "min_bars": 60,  "desc": "Weekly candles · holds months to years",
+        "period": "5y",  "interval": "1wk", "sma_fast": 50,  "sma_slow": 200,
+        "min_bars": 200, "desc": "Weekly candles · holds months to years",
     },
     "⚡ Day Trade": {
         "period": "5d",  "interval": "15m", "sma_fast": 20,  "sma_slow": 50,
