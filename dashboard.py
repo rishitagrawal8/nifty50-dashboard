@@ -63,6 +63,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ── Timeframe configs ─────────────────────────────────────────────────────────
+TIMEFRAMES = {
+    "📈 Swing Trade": {
+        "period": "1y",  "interval": "1d",  "sma_fast": 50,  "sma_slow": 200,
+        "min_bars": 200, "desc": "Daily candles · holds days to weeks",
+    },
+    "🏦 Long Term": {
+        "period": "3y",  "interval": "1wk", "sma_fast": 50,  "sma_slow": 200,
+        "min_bars": 60,  "desc": "Weekly candles · holds months to years",
+    },
+    "⚡ Day Trade": {
+        "period": "5d",  "interval": "15m", "sma_fast": 20,  "sma_slow": 50,
+        "min_bars": 50,  "desc": "15-min candles · intraday positions",
+    },
+}
+
 # ── NIFTY 50 universe ─────────────────────────────────────────────────────────
 NIFTY50 = [
     "ADANIENT.NS",  "ADANIPORTS.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS",
@@ -98,11 +114,11 @@ def calc_macd(close):
     return line, signal, hist
 
 
-def get_signal(price, rsi, sma50, sma200, macd_hist):
-    above_200 = price > sma200
-    if rsi < 35 and above_200:
+def get_signal(price, rsi, sma_fast, sma_slow, macd_hist):
+    above_slow = price > sma_slow
+    if rsi < 35 and above_slow:
         return "BUY"
-    elif rsi > 75 or not above_200:
+    elif rsi > 75 or not above_slow:
         return "SELL"
     return "HOLD"
 
@@ -117,55 +133,53 @@ def calc_atr(df, period=14):
     return tr.rolling(period).mean()
 
 
-def calc_stop_target(price, atr, sma50, sma200, signal):
+def calc_stop_target(price, atr, sma_fast, sma_slow):
     """
     Stop loss  = price - 1.5 × ATR, floored at the nearest key SMA support.
     Target     = price + 2 × (price - stop_loss)  →  2:1 reward:risk.
     """
-    atr_stop = round(price - 1.5 * atr, 2)
-
-    # Use the highest SMA that sits below price as a natural support floor
-    supports = [s for s in [sma50, sma200] if s < price]
+    atr_stop  = round(price - 1.5 * atr, 2)
+    supports  = [s for s in [sma_fast, sma_slow] if s < price]
     sma_floor = max(supports) if supports else atr_stop
-
-    # Take the higher (tighter) of ATR stop and SMA floor
-    stop = round(max(atr_stop, sma_floor), 2)
-    risk = price - stop
-    target = round(price + 2 * risk, 2)
-
+    stop      = round(max(atr_stop, sma_floor), 2)
+    risk      = price - stop
+    target    = round(price + 2 * risk, 2)
     stop_pct   = round(-risk / price * 100, 1)
     target_pct = round(2 * risk / price * 100, 1)
     return stop, target, stop_pct, target_pct
 
 
 # ── Fetch ─────────────────────────────────────────────────────────────────────
-def fetch_single(ticker):
+def fetch_single(ticker, cfg):
     try:
-        df = yf.Ticker(ticker).history(period="1y", auto_adjust=True)
-        if df.empty or len(df) < 200:
+        df = yf.Ticker(ticker).history(
+            period=cfg["period"], interval=cfg["interval"], auto_adjust=True
+        )
+        if df.empty or len(df) < cfg["min_bars"]:
             return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        close  = df["Close"].dropna()
-        price  = round(float(close.iloc[-1]), 2)
-        sma50  = round(close.rolling(50).mean().iloc[-1], 2)
-        sma200 = round(close.rolling(200).mean().iloc[-1], 2)
-        rsi_s  = calc_rsi(close)
-        rsi    = round(float(rsi_s.iloc[-1]), 1)
+        close    = df["Close"].dropna()
+        fast, slow = cfg["sma_fast"], cfg["sma_slow"]
+
+        price    = round(float(close.iloc[-1]), 2)
+        sma_fast = round(close.rolling(fast).mean().iloc[-1], 2)
+        sma_slow = round(close.rolling(slow).mean().iloc[-1], 2)
+        rsi_s    = calc_rsi(close)
+        rsi      = round(float(rsi_s.iloc[-1]), 1)
         ml, sl, mh = calc_macd(close)
         macd_hist  = round(float(mh.iloc[-1]), 2)
-        signal     = get_signal(price, rsi, sma50, sma200, macd_hist)
+        signal     = get_signal(price, rsi, sma_fast, sma_slow, macd_hist)
 
         atr_s  = calc_atr(df)
         atr    = round(float(atr_s.iloc[-1]), 2)
-        stop, target, stop_pct, target_pct = calc_stop_target(price, atr, sma50, sma200, signal)
+        stop, target, stop_pct, target_pct = calc_stop_target(price, atr, sma_fast, sma_slow)
 
-        # Attach full series for charting
         df = df.copy()
-        df["SMA50"]  = close.rolling(50).mean()
-        df["SMA200"] = close.rolling(200).mean()
-        df["RSI"]    = rsi_s
+        df["SMAfast"] = close.rolling(fast).mean()
+        df["SMAslow"] = close.rolling(slow).mean()
+        df["RSI"]     = rsi_s
         df["MACD"], df["SignalLine"], df["Hist"] = calc_macd(close)
 
         return {
@@ -173,11 +187,13 @@ def fetch_single(ticker):
             "name":       ticker.replace(".NS", "").replace(".BO", ""),
             "df":         df,
             "price":      price,
+            "sma_fast":   sma_fast,
+            "sma_slow":   sma_slow,
+            "sma_fast_label": f"SMA {fast}",
+            "sma_slow_label": f"SMA {slow}",
             "rsi":        rsi,
-            "sma50":      sma50,
-            "sma200":     sma200,
             "macd_hist":  macd_hist,
-            "vs200":      round((price - sma200) / sma200 * 100, 1),
+            "vs_slow":    round((price - sma_slow) / sma_slow * 100, 1),
             "signal":     signal,
             "atr":        atr,
             "stop":       stop,
@@ -190,10 +206,11 @@ def fetch_single(ticker):
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_all():
+def fetch_all(timeframe_key: str):
+    cfg     = TIMEFRAMES[timeframe_key]
     results = []
     with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = {pool.submit(fetch_single, t): t for t in NIFTY50}
+        futures = {pool.submit(fetch_single, t, cfg): t for t in NIFTY50}
         for fut in as_completed(futures):
             data = fut.result()
             if data:
@@ -207,23 +224,25 @@ def fetch_all():
 SIG_COLOR = {"BUY": "#2ecc71", "SELL": "#e74c3c", "HOLD": "#f39c12"}
 
 def build_chart(data):
-    df     = data["df"].dropna(subset=["SMA200"])
+    df     = data["df"].dropna(subset=["SMAslow"])
     ticker = data["name"]
     signal = data["signal"]
     price  = data["price"]
+    fl     = data["sma_fast_label"]
+    sl     = data["sma_slow_label"]
 
     fig = make_subplots(
         rows=3, cols=1,
         shared_xaxes=True,
         vertical_spacing=0.04,
         row_heights=[0.55, 0.22, 0.23],
-        subplot_titles=("Price  •  SMA 50  •  SMA 200", "MACD", "RSI (14)"),
+        subplot_titles=(f"Price  •  {fl}  •  {sl}", "MACD", "RSI (14)"),
     )
 
     # ── Price panel ───────────────────────────────────────────────────────────
-    # Green fill: price above SMA200
+    # Green fill: price above slow SMA
     fig.add_trace(go.Scatter(
-        x=df.index, y=df["SMA200"],
+        x=df.index, y=df["SMAslow"],
         mode="lines", line=dict(width=0),
         showlegend=False, hoverinfo="skip",
     ), row=1, col=1)
@@ -234,14 +253,14 @@ def build_chart(data):
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ), row=1, col=1)
 
-    # Red fill: SMA200 above price
+    # Red fill: slow SMA above price
     fig.add_trace(go.Scatter(
         x=df.index, y=df["Close"],
         mode="lines", line=dict(width=0),
         showlegend=False, hoverinfo="skip",
     ), row=1, col=1)
     fig.add_trace(go.Scatter(
-        x=df.index, y=df["SMA200"],
+        x=df.index, y=df["SMAslow"],
         mode="lines", fill="tonexty",
         fillcolor="rgba(231,76,60,0.07)",
         line=dict(width=0), showlegend=False, hoverinfo="skip",
@@ -249,14 +268,14 @@ def build_chart(data):
 
     # SMA lines
     fig.add_trace(go.Scatter(
-        x=df.index, y=df["SMA50"],
-        name="SMA 50", line=dict(color="#e67e22", width=1.5, dash="dot"),
-        hovertemplate="SMA50: ₹%{y:,.2f}<extra></extra>",
+        x=df.index, y=df["SMAfast"],
+        name=fl, line=dict(color="#e67e22", width=1.5, dash="dot"),
+        hovertemplate=f"{fl}: ₹%{{y:,.2f}}<extra></extra>",
     ), row=1, col=1)
     fig.add_trace(go.Scatter(
-        x=df.index, y=df["SMA200"],
-        name="SMA 200", line=dict(color="#8e44ad", width=1.5, dash="dot"),
-        hovertemplate="SMA200: ₹%{y:,.2f}<extra></extra>",
+        x=df.index, y=df["SMAslow"],
+        name=sl, line=dict(color="#8e44ad", width=1.5, dash="dot"),
+        hovertemplate=f"{sl}: ₹%{{y:,.2f}}<extra></extra>",
     ), row=1, col=1)
 
     # Price line (on top)
@@ -348,7 +367,7 @@ def build_table(results):
             "Ticker":    d["name"],
             "Price (₹)": d["price"],
             "RSI":       d["rsi"],
-            "vs SMA200": d["vs200"],
+            "vs Slow SMA": d["vs_slow"],
             "MACD Hist": d["macd_hist"],
             "Stop Loss": d["stop"],
             "SL %":      d["stop_pct"],
@@ -394,7 +413,14 @@ def render_dashboard(results):
     st.caption(f"Last updated: {datetime.now().strftime('%d %b %Y, %H:%M:%S')}  •  Data cached for 15 min  •  Click any row to view chart")
     st.divider()
 
-    df_table = build_table(results)
+    # Search bar
+    search = st.text_input("🔍 Search stock", placeholder="e.g. RELIANCE, INFY, TCS …", label_visibility="collapsed")
+    filtered = [r for r in results if search.upper() in r["name"]] if search else results
+    if search and not filtered:
+        st.warning(f"No stocks matched '{search}'.")
+        return
+
+    df_table = build_table(filtered)
     event = st.dataframe(
         df_table,
         use_container_width=True,
@@ -402,51 +428,51 @@ def render_dashboard(results):
         on_select="rerun",
         selection_mode="single-row",
         column_config={
-            "Ticker":    st.column_config.TextColumn("Ticker", width="small"),
-            "Price (₹)": st.column_config.NumberColumn("Price (₹)", format="₹%.2f"),
-            "RSI":       st.column_config.NumberColumn("RSI", format="%.1f"),
-            "vs SMA200": st.column_config.NumberColumn("vs SMA200", format="%.1f%%"),
-            "MACD Hist": st.column_config.NumberColumn("MACD Hist", format="%.2f"),
-            "Stop Loss": st.column_config.NumberColumn("Stop Loss ₹", format="₹%.2f"),
-            "SL %":      st.column_config.NumberColumn("SL %", format="%.1f%%"),
-            "Target":    st.column_config.NumberColumn("Target ₹", format="₹%.2f"),
-            "Tgt %":     st.column_config.NumberColumn("Tgt %", format="+%.1f%%"),
-            "Signal":    st.column_config.TextColumn("Signal", width="small"),
+            "Ticker":      st.column_config.TextColumn("Ticker", width="small"),
+            "Price (₹)":   st.column_config.NumberColumn("Price (₹)", format="₹%.2f"),
+            "RSI":         st.column_config.NumberColumn("RSI", format="%.1f"),
+            "vs Slow SMA": st.column_config.NumberColumn("vs Slow SMA", format="%.1f%%"),
+            "MACD Hist":   st.column_config.NumberColumn("MACD Hist", format="%.2f"),
+            "Stop Loss":   st.column_config.NumberColumn("Stop Loss ₹", format="₹%.2f"),
+            "SL %":        st.column_config.NumberColumn("SL %", format="%.1f%%"),
+            "Target":      st.column_config.NumberColumn("Target ₹", format="₹%.2f"),
+            "Tgt %":       st.column_config.NumberColumn("Tgt %", format="+%.1f%%"),
+            "Signal":      st.column_config.TextColumn("Signal", width="small"),
         },
     )
 
     selected_rows = event.selection.rows
     if selected_rows:
         idx  = selected_rows[0]
-        data = results[idx]
+        data = filtered[idx]
         st.divider()
         st.plotly_chart(build_chart(data), use_container_width=True)
 
         with st.expander("📊 Indicator breakdown", expanded=True):
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Current Price", f"₹{data['price']:,.2f}")
-            c2.metric("RSI (14)",      f"{data['rsi']}")
-            c3.metric("SMA 50",        f"₹{data['sma50']:,.0f}")
-            c4.metric("SMA 200",       f"₹{data['sma200']:,.0f}")
-            c5.metric("vs SMA 200",    f"{data['vs200']:+.1f}%",
-                      delta_color="normal" if data["vs200"] >= 0 else "inverse")
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            c1.metric("Current Price",      f"₹{data['price']:,.2f}")
+            c2.metric("RSI (14)",           f"{data['rsi']}")
+            c3.metric(data["sma_fast_label"], f"₹{data['sma_fast']:,.0f}")
+            c4.metric(data["sma_slow_label"], f"₹{data['sma_slow']:,.0f}")
+            c5.metric("Stop Loss",          f"₹{data['stop']:,.2f}", delta=f"{data['stop_pct']}%", delta_color="inverse")
+            c6.metric("Target",             f"₹{data['target']:,.2f}", delta=f"+{data['target_pct']}%")
 
             st.write("")
             sig   = data["signal"]
             color = SIG_COLOR[sig]
-            above = data["price"] > data["sma200"]
+            above = data["price"] > data["sma_slow"]
             st.markdown(f"**Decision: <span style='color:{color}'>{SIGNAL_LABEL[sig]}</span>**", unsafe_allow_html=True)
             if sig == "BUY":
                 st.markdown(f"- RSI **{data['rsi']}** < 35 → oversold territory")
-                st.markdown(f"- Price **₹{data['price']:,}** > SMA200 **₹{data['sma200']:,}** → long-term uptrend intact")
+                st.markdown(f"- Price above **{data['sma_slow_label']}** ₹{data['sma_slow']:,} → uptrend intact")
             elif sig == "SELL":
                 if data["rsi"] > 75:
                     st.markdown(f"- RSI **{data['rsi']}** > 75 → overbought territory")
                 if not above:
-                    st.markdown(f"- Price **₹{data['price']:,}** < SMA200 **₹{data['sma200']:,}** → long-term downtrend")
+                    st.markdown(f"- Price below **{data['sma_slow_label']}** ₹{data['sma_slow']:,} → downtrend")
             else:
                 st.markdown(f"- RSI **{data['rsi']}** in neutral zone (35–75)")
-                st.markdown(f"- Price is **{'above' if above else 'below'}** SMA200 → awaiting clearer signal")
+                st.markdown(f"- Price is **{'above' if above else 'below'}** {data['sma_slow_label']} → awaiting clearer signal")
     else:
         st.info("👆 Click any row in the table above to view its price chart.", icon="📊")
 
@@ -623,8 +649,17 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
+    # Timeframe selector
+    tf_key = st.radio(
+        "Timeframe",
+        options=list(TIMEFRAMES.keys()),
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    st.caption(f"**{tf_key}** — {TIMEFRAMES[tf_key]['desc']}")
+
     with st.spinner("Fetching live data for all 50 stocks …"):
-        results = fetch_all()
+        results = fetch_all(tf_key)
 
     # Invalidate cache if data schema is outdated (missing new keys)
     if results and "stop" not in results[0]:
