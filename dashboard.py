@@ -4,6 +4,7 @@
 import warnings
 warnings.filterwarnings("ignore")
 
+import json
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -306,27 +307,28 @@ def build_table(results):
     return pd.DataFrame(rows)
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-def main():
-    # Header
-    col_title, col_refresh = st.columns([5, 1])
-    with col_title:
-        st.title("📈 NIFTY 50 Dashboard")
-    with col_refresh:
-        st.write("")
-        if st.button("🔄 Refresh", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
+# ── Portfolio helpers ─────────────────────────────────────────────────────────
 
-    # Fetch data
-    with st.spinner("Fetching live data for all 50 stocks …"):
-        results = fetch_all()
+NIFTY50_NAMES = sorted([t.replace(".NS", "").replace(".BO", "") for t in NIFTY50])
 
-    if not results:
-        st.error("Failed to fetch data. Please check your internet connection and try again.")
-        return
+def portfolio_recommendation(signal, pnl_pct):
+    if signal == "BUY":
+        return "🟢 Add more — oversold dip in an uptrend"
+    if signal == "SELL":
+        if pnl_pct is None:
+            return "🔴 Consider exiting — bearish signal"
+        if pnl_pct > 5:
+            return f"🔴 Lock in profits (+{pnl_pct:.1f}%) — trend turning bearish"
+        if pnl_pct < -5:
+            return f"🔴 Cut losses ({pnl_pct:.1f}%) — trend broken"
+        return "🔴 Exit near breakeven — bearish signal"
+    # HOLD
+    if pnl_pct is not None and pnl_pct > 15:
+        return "🟡 Hold — strong gains, keep trailing stop-loss"
+    return "🟡 Hold — no clear direction yet"
 
-    # Summary metrics
+
+def render_dashboard(results):
     counts = {"BUY": 0, "HOLD": 0, "SELL": 0}
     for d in results:
         counts[d["signal"]] += 1
@@ -338,12 +340,9 @@ def main():
     m4.metric("🔴 SELL", counts["SELL"])
 
     st.caption(f"Last updated: {datetime.now().strftime('%d %b %Y, %H:%M:%S')}  •  Data cached for 15 min  •  Click any row to view chart")
-
     st.divider()
 
-    # Table
     df_table = build_table(results)
-
     event = st.dataframe(
         df_table,
         use_container_width=True,
@@ -362,16 +361,13 @@ def main():
         },
     )
 
-    # Chart on row click
     selected_rows = event.selection.rows
     if selected_rows:
         idx  = selected_rows[0]
         data = results[idx]
         st.divider()
-        fig = build_chart(data)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(build_chart(data), use_container_width=True)
 
-        # Indicator breakdown below chart
         with st.expander("📊 Indicator breakdown", expanded=True):
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Current Price", f"₹{data['price']:,.2f}")
@@ -385,7 +381,6 @@ def main():
             sig   = data["signal"]
             color = SIG_COLOR[sig]
             above = data["price"] > data["sma200"]
-
             st.markdown(f"**Decision: <span style='color:{color}'>{SIGNAL_LABEL[sig]}</span>**", unsafe_allow_html=True)
             if sig == "BUY":
                 st.markdown(f"- RSI **{data['rsi']}** < 35 → oversold territory")
@@ -400,6 +395,175 @@ def main():
                 st.markdown(f"- Price is **{'above' if above else 'below'}** SMA200 → awaiting clearer signal")
     else:
         st.info("👆 Click any row in the table above to view its price chart.", icon="📊")
+
+
+def render_portfolio(results):
+    lookup = {d["name"]: d for d in results}
+
+    st.subheader("Enter your holdings")
+    st.caption("Add the stocks you own, how many shares, and your average buy price. Buy price is optional but enables P&L tracking.")
+
+    # Init session state
+    if "portfolio" not in st.session_state:
+        st.session_state.portfolio = pd.DataFrame(
+            [{"Ticker": "RELIANCE", "Shares": 10.0, "Avg Buy Price (₹)": 0.0}]
+        )
+
+    edited = st.data_editor(
+        st.session_state.portfolio,
+        use_container_width=True,
+        num_rows="dynamic",
+        column_config={
+            "Ticker": st.column_config.SelectboxColumn(
+                "Ticker", options=NIFTY50_NAMES, required=True
+            ),
+            "Shares": st.column_config.NumberColumn(
+                "Shares", min_value=0.0, step=1.0, required=True
+            ),
+            "Avg Buy Price (₹)": st.column_config.NumberColumn(
+                "Avg Buy Price (₹)", min_value=0.0, step=0.5,
+                help="Leave 0 if unknown — P&L columns will be hidden"
+            ),
+        },
+        hide_index=True,
+    )
+
+    if st.button("📊 Analyse Portfolio", type="primary", use_container_width=False):
+        st.session_state.portfolio = edited
+        st.session_state.show_analysis = True
+
+    if not st.session_state.get("show_analysis"):
+        return
+
+    portfolio = st.session_state.portfolio.dropna(subset=["Ticker"])
+    portfolio = portfolio[portfolio["Shares"] > 0]
+    if portfolio.empty:
+        st.warning("Add at least one holding with shares > 0.")
+        return
+
+    has_buy_price = portfolio["Avg Buy Price (₹)"].gt(0).any()
+
+    # Build analysis rows
+    rows = []
+    for _, row in portfolio.iterrows():
+        name = row["Ticker"]
+        if name not in lookup:
+            continue
+        d          = lookup[name]
+        shares     = row["Shares"]
+        buy_price  = row["Avg Buy Price (₹)"]
+        cur_price  = d["price"]
+        cur_value  = round(cur_price * shares, 2)
+
+        pnl_amt  = round((cur_price - buy_price) * shares, 2) if buy_price > 0 else None
+        pnl_pct  = round((cur_price - buy_price) / buy_price * 100, 2) if buy_price > 0 else None
+        rec      = portfolio_recommendation(d["signal"], pnl_pct)
+
+        r = {
+            "Ticker":          name,
+            "Shares":          shares,
+            "Current Price":   cur_price,
+            "Current Value":   cur_value,
+            "Signal":          SIGNAL_LABEL[d["signal"]],
+            "Action":          rec,
+        }
+        if has_buy_price:
+            r["Buy Price"]   = buy_price if buy_price > 0 else None
+            r["P&L (₹)"]    = pnl_amt
+            r["P&L (%)"]    = pnl_pct
+        rows.append(r)
+
+    if not rows:
+        st.error("None of your tickers matched NIFTY 50 data. Check spelling.")
+        return
+
+    df_port = pd.DataFrame(rows)
+
+    st.divider()
+    st.subheader("Portfolio Analysis")
+
+    # Summary metrics
+    total_value = df_port["Current Value"].sum()
+    sig_counts  = df_port["Signal"].value_counts()
+
+    col_config = {
+        "Ticker":        st.column_config.TextColumn("Ticker"),
+        "Shares":        st.column_config.NumberColumn("Shares", format="%.0f"),
+        "Current Price": st.column_config.NumberColumn("Current Price", format="₹%.2f"),
+        "Current Value": st.column_config.NumberColumn("Current Value", format="₹%.2f"),
+        "Signal":        st.column_config.TextColumn("Signal"),
+        "Action":        st.column_config.TextColumn("Action", width="large"),
+    }
+
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Portfolio Value", f"₹{total_value:,.0f}")
+
+    if has_buy_price:
+        valid_pnl = df_port["P&L (₹)"].dropna()
+        total_pnl = valid_pnl.sum()
+        pnl_color = "normal" if total_pnl >= 0 else "inverse"
+        s2.metric("Total P&L", f"₹{total_pnl:,.0f}", delta_color=pnl_color)
+        col_config["Buy Price"] = st.column_config.NumberColumn("Buy Price", format="₹%.2f")
+        col_config["P&L (₹)"]  = st.column_config.NumberColumn("P&L (₹)", format="₹%.2f")
+        col_config["P&L (%)"]  = st.column_config.NumberColumn("P&L (%)", format="%.2f%%")
+    else:
+        s2.metric("Holdings", len(rows))
+
+    s3.metric("🔴 Sell signals", sig_counts.get("🔴 SELL", 0))
+    s4.metric("🟢 Buy signals",  sig_counts.get("🟢 BUY",  0))
+
+    st.dataframe(df_port, use_container_width=True, hide_index=True, column_config=col_config)
+
+    # Urgent alerts
+    sell_holds = df_port[df_port["Signal"] == "🔴 SELL"]
+    buy_holds  = df_port[df_port["Signal"] == "🟢 BUY"]
+
+    if not sell_holds.empty:
+        st.divider()
+        st.markdown("### ⚠️ Stocks requiring attention")
+        for _, r in sell_holds.iterrows():
+            st.error(f"**{r['Ticker']}** — {r['Action']}", icon="🔴")
+
+    if not buy_holds.empty:
+        st.divider()
+        st.markdown("### 💡 Opportunities in your portfolio")
+        for _, r in buy_holds.iterrows():
+            st.success(f"**{r['Ticker']}** — {r['Action']}", icon="🟢")
+
+    # Chart for selected holding
+    st.divider()
+    st.subheader("View chart for a holding")
+    tickers_in_portfolio = df_port["Ticker"].tolist()
+    chosen = st.selectbox("Select stock", tickers_in_portfolio)
+    if chosen and chosen in lookup:
+        st.plotly_chart(build_chart(lookup[chosen]), use_container_width=True)
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+def main():
+    col_title, col_refresh = st.columns([5, 1])
+    with col_title:
+        st.title("📈 NIFTY 50 Dashboard")
+    with col_refresh:
+        st.write("")
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+    with st.spinner("Fetching live data for all 50 stocks …"):
+        results = fetch_all()
+
+    if not results:
+        st.error("Failed to fetch data. Please check your internet connection and try again.")
+        return
+
+    tab1, tab2 = st.tabs(["📊 Market Dashboard", "💼 My Portfolio"])
+
+    with tab1:
+        render_dashboard(results)
+
+    with tab2:
+        render_portfolio(results)
 
 
 if __name__ == "__main__":
