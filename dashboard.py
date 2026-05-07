@@ -856,6 +856,7 @@ def main():
         options=list(TIMEFRAMES.keys()),
         horizontal=True,
         label_visibility="collapsed",
+        key="tf_selector",
     )
     st.caption(f"**{tf_key}** — {TIMEFRAMES[tf_key]['desc']}")
 
