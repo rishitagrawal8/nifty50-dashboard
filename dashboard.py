@@ -626,6 +626,11 @@ def main():
     with st.spinner("Fetching live data for all 50 stocks …"):
         results = fetch_all()
 
+    # Invalidate cache if data schema is outdated (missing new keys)
+    if results and "stop" not in results[0]:
+        st.cache_data.clear()
+        st.rerun()
+
     if not results:
         st.error("Failed to fetch data. Please check your internet connection and try again.")
         return
