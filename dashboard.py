@@ -78,6 +78,13 @@ TIMEFRAMES = {
     },
 }
 
+# ── Backtest configs (extended history) ──────────────────────────────────────
+BT_CONFIGS = {
+    "📈 Swing Trade": {"period": "3y",  "interval": "1d",  "sma_fast": 50, "sma_slow": 200, "min_bars": 210, "max_hold": 60},
+    "🏦 Long Term":   {"period": "15y", "interval": "1wk", "sma_fast": 50, "sma_slow": 200, "min_bars": 210, "max_hold": 26},
+    "⚡ Day Trade":   {"period": "60d", "interval": "15m", "sma_fast": 20, "sma_slow": 50,  "min_bars": 60,  "max_hold": 25},
+}
+
 # ── NIFTY 50 universe ─────────────────────────────────────────────────────────
 NIFTY50 = [
     "ADANIENT.NS",  "ADANIPORTS.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS",
@@ -163,6 +170,141 @@ def calc_stop_target(df, price, atr, signal, interval):
         target_pct = round((target - price) / price * 100, 1)
 
     return stop, target, stop_pct, target_pct
+
+
+# ── Backtesting engine ────────────────────────────────────────────────────────
+def _compute_quality_score(win_rate, avg_win, avg_loss, n_trades):
+    if n_trades < 3:
+        return None
+    exp = win_rate * avg_win + (1 - win_rate) * avg_loss
+    exp_score  = max(0.0, min(50.0, (exp + 3.0) / 6.0 * 50.0))
+    wr_score   = max(0.0, min(30.0, (win_rate - 0.40) / 0.20 * 30.0))
+    size_score = min(20.0, n_trades / 10.0 * 20.0)
+    return round(exp_score + wr_score + size_score)
+
+
+def backtest_single(ticker, tf_key):
+    try:
+        cfg = BT_CONFIGS[tf_key]
+        df  = yf.Ticker(ticker).history(
+            period=cfg["period"], interval=cfg["interval"], auto_adjust=True
+        )
+        if df.empty or len(df) < cfg["min_bars"]:
+            return {"ticker": ticker, "n_trades": 0, "win_rate": 0, "avg_win": 0,
+                    "avg_loss": 0, "expectancy": 0, "quality_score": None, "error": "insufficient_data"}
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+
+        close      = df["Close"]
+        fast, slow = cfg["sma_fast"], cfg["sma_slow"]
+        interval   = cfg["interval"]
+        n_lb       = {"15m": 20, "1d": 14, "1wk": 20}.get(interval, 14)
+
+        sma_fast_s = close.rolling(fast).mean()
+        sma_slow_s = close.rolling(slow).mean()
+        rsi_s      = calc_rsi(close)
+        atr_s      = calc_atr(df)
+        _, _, hist_s = calc_macd(close)
+
+        valid_mask = sma_slow_s.notna() & rsi_s.notna() & atr_s.notna()
+        start_i    = int(valid_mask.values.argmax())
+
+        trades     = []
+        in_trade   = False
+        prev_sig   = "HOLD"
+        entry_price = stop = target = 0.0
+        entry_idx   = -1
+
+        for i in range(start_i, len(df)):
+            sf  = sma_fast_s.iloc[i]
+            sw  = sma_slow_s.iloc[i]
+            rsi = rsi_s.iloc[i]
+            atr = atr_s.iloc[i]
+            mh  = hist_s.iloc[i]
+            if pd.isna(sf) or pd.isna(sw) or pd.isna(rsi) or pd.isna(atr) or pd.isna(mh):
+                continue
+
+            price_i = float(close.iloc[i])
+            high_i  = float(df["High"].iloc[i])
+            low_i   = float(df["Low"].iloc[i])
+            cur_sig = get_signal(price_i, float(rsi), float(sf), float(sw), float(mh))
+
+            # Exit check before entry
+            if in_trade and i > entry_idx:
+                bars_held = i - entry_idx
+                if high_i >= target:
+                    ret = (target - entry_price) / entry_price * 100
+                    trades.append({"result": "WIN",  "ret": ret, "bars": bars_held})
+                    in_trade = False
+                elif low_i <= stop:
+                    ret = (stop - entry_price) / entry_price * 100
+                    trades.append({"result": "LOSS", "ret": ret, "bars": bars_held})
+                    in_trade = False
+                elif cur_sig == "SELL":
+                    ret = (price_i - entry_price) / entry_price * 100
+                    trades.append({"result": "EXIT", "ret": ret, "bars": bars_held})
+                    in_trade = False
+                elif bars_held >= cfg["max_hold"]:
+                    ret = (price_i - entry_price) / entry_price * 100
+                    trades.append({"result": "TIMEOUT", "ret": ret, "bars": bars_held})
+                    in_trade = False
+
+            # Entry check
+            if not in_trade and cur_sig == "BUY" and prev_sig != "BUY":
+                df_slice    = df.iloc[:i + 1]
+                recent_low  = float(df_slice["Low"].iloc[-n_lb:].min())
+                recent_high = float(df_slice["High"].iloc[-n_lb:].max())
+                atr_stop    = price_i - 2 * float(atr)
+                stop_val    = max(recent_low, atr_stop)
+                risk        = price_i - stop_val
+                if risk > 0 and stop_val < price_i:
+                    target_val = max(recent_high, price_i + 1.5 * risk)
+                    if target_val > price_i:
+                        entry_price = price_i
+                        stop        = stop_val
+                        target      = target_val
+                        entry_idx   = i
+                        in_trade    = True
+
+            prev_sig = cur_sig
+
+        if not trades:
+            return {"ticker": ticker, "n_trades": 0, "win_rate": 0, "avg_win": 0,
+                    "avg_loss": 0, "expectancy": 0, "quality_score": None, "error": "no_trades"}
+
+        wins   = [t for t in trades if t["result"] == "WIN"]
+        losses = [t for t in trades if t["result"] != "WIN"]
+        n      = len(trades)
+        wr     = len(wins) / n
+        aw     = sum(t["ret"] for t in wins)   / len(wins)   if wins   else 0.0
+        al     = sum(t["ret"] for t in losses) / len(losses) if losses else 0.0
+        exp    = wr * aw + (1 - wr) * al
+        return {
+            "ticker":        ticker,
+            "n_trades":      n,
+            "win_rate":      wr,
+            "avg_win":       round(aw, 2),
+            "avg_loss":      round(al, 2),
+            "expectancy":    round(exp, 2),
+            "quality_score": _compute_quality_score(wr, aw, al, n),
+            "error":         None,
+        }
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_backtest(tf_key: str):
+    results = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(backtest_single, t, tf_key): t for t in NIFTY50}
+        for fut in as_completed(futures):
+            data = fut.result()
+            if data:
+                results.append(data)
+    results.sort(key=lambda d: (-(d["quality_score"] or 0), -d["win_rate"]))
+    return results
 
 
 # ── Fetch ─────────────────────────────────────────────────────────────────────
@@ -839,6 +981,86 @@ def render_portfolio(results):
         st.plotly_chart(build_chart(lookup[chosen]), use_container_width=True)
 
 
+# ── Backtest renderer ─────────────────────────────────────────────────────────
+def render_backtest(results, tf_key):
+    cfg = BT_CONFIGS[tf_key]
+
+    st.info(
+        "**What is this?**  \n"
+        "This tab replays every BUY signal generated by the app over the past "
+        f"{'3 years' if cfg['interval']=='1d' else '15 years' if cfg['interval']=='1wk' else '60 days'} "
+        f"of {tf_key} data and checks: did the stock reach its target price before hitting the stop loss?  \n"
+        "A higher quality score means the signals have been more reliable historically.  \n"
+        "⚠️ Past performance does not guarantee future results."
+    )
+
+    valid = [r for r in results if r["n_trades"] >= 3 and r["quality_score"] is not None]
+    if not valid:
+        st.warning("Not enough trades found to score signals. Try a different timeframe.")
+        return
+
+    avg_q      = sum(r["quality_score"] for r in valid) / len(valid)
+    reliable   = sum(1 for r in valid if r["win_rate"] > 0.55)
+    marginal   = sum(1 for r in valid if 0.45 <= r["win_rate"] <= 0.55)
+    unreliable = sum(1 for r in valid if r["win_rate"] < 0.45)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Stocks Scored", len(valid))
+    m2.metric("Avg Signal Quality", f"{avg_q:.0f} / 100")
+    m3.metric("🟢 Reliable (>55%)", reliable)
+    m4.metric("🟡 Marginal (45–55%)", marginal)
+    m5.metric("🔴 Unreliable (<45%)", unreliable)
+
+    st.divider()
+
+    def _wr_label(wr, n):
+        if n < 3:
+            return "—"
+        pct = wr * 100
+        if wr > 0.55:    return f"🟢 {pct:.1f}%"
+        elif wr >= 0.45: return f"🟡 {pct:.1f}%"
+        else:            return f"🔴 {pct:.1f}%"
+
+    rows = []
+    for r in results:
+        n = r["n_trades"]
+        rows.append({
+            "Ticker":     r["ticker"].replace(".NS", "").replace(".BO", ""),
+            "Trades":     n,
+            "Win Rate":   _wr_label(r["win_rate"], n),
+            "Avg Win":    f"+{r['avg_win']:.2f}%" if n >= 3 else "—",
+            "Avg Loss":   f"{r['avg_loss']:.2f}%"  if n >= 3 else "—",
+            "Expectancy": f"{r['expectancy']:+.2f}%" if n >= 3 else "—",
+            "Quality":    r["quality_score"] if n >= 3 else None,
+        })
+
+    df_bt = pd.DataFrame(rows)
+    st.dataframe(
+        df_bt,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Ticker":     st.column_config.TextColumn("Ticker",    width="small"),
+            "Trades":     st.column_config.NumberColumn("Trades",  format="%d", width="small"),
+            "Win Rate":   st.column_config.TextColumn("Win Rate",  width="small"),
+            "Avg Win":    st.column_config.TextColumn("Avg Win",   width="small"),
+            "Avg Loss":   st.column_config.TextColumn("Avg Loss",  width="small"),
+            "Expectancy": st.column_config.TextColumn("Expectancy"),
+            "Quality":    st.column_config.ProgressColumn(
+                "Signal Quality (0–100)", min_value=0, max_value=100, width="medium"
+            ),
+        },
+    )
+
+    skipped = [r for r in results if r["n_trades"] < 3]
+    if skipped:
+        names = ", ".join(r["ticker"].replace(".NS","") for r in skipped)
+        st.caption(
+            f"⚠️ {len(skipped)} stocks had fewer than 3 historical BUY signals and are unscored "
+            f"({names}). This means RSI < 35 + price above SMA {cfg['sma_slow']} was rarely triggered for them."
+        )
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
     col_title, col_refresh = st.columns([5, 1])
@@ -872,13 +1094,31 @@ def main():
         st.error("Failed to fetch data. Please check your internet connection and try again.")
         return
 
-    tab1, tab2 = st.tabs(["📊 Market Dashboard", "💼 My Portfolio"])
+    tab1, tab2, tab3 = st.tabs(["📊 Market Dashboard", "💼 My Portfolio", "🔬 Backtest"])
 
     with tab1:
         render_dashboard(results)
 
     with tab2:
         render_portfolio(results)
+
+    with tab3:
+        if "bt_results" not in st.session_state or st.session_state.get("bt_tf") != tf_key:
+            st.markdown("### 🔬 Signal Reliability Backtest")
+            st.write(
+                "Run a historical simulation to see how reliable the BUY signals have been. "
+                "For each signal in the past, it checks whether the stock hit its target before its stop loss."
+            )
+            if st.button("▶️ Run Backtest", type="primary"):
+                with st.spinner(f"Backtesting all 50 stocks on {tf_key} data … this takes ~15–30 seconds"):
+                    st.session_state.bt_results = run_backtest(tf_key)
+                    st.session_state.bt_tf      = tf_key
+                st.rerun()
+        else:
+            render_backtest(st.session_state.bt_results, tf_key)
+            if st.button("🔄 Re-run Backtest"):
+                del st.session_state["bt_results"]
+                st.rerun()
 
 
 if __name__ == "__main__":
