@@ -113,12 +113,15 @@ def _sb_save_portfolio(access_token: str, user_id: str, holdings: list):
 def render_auth_sidebar():
     """Show login/logout control in the sidebar."""
     sb = _get_supabase()
-    if sb is None:
-        return  # silently skip if Supabase not configured
 
     with st.sidebar:
         st.markdown("## 👤 Account")
         st.divider()
+        if sb is None:
+            st.warning("Auth not configured.", icon="⚠️")
+            st.caption("Add SUPABASE_URL and SUPABASE_KEY to Streamlit Cloud secrets.")
+            return
+
         if "sb_session" in st.session_state:
             email = st.session_state.get("sb_user_email", "")
             st.success(f"✓ {email}", icon="🟢")
