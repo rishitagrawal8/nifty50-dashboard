@@ -122,11 +122,15 @@ def calc_macd(close):
 
 def get_signal(price, rsi, sma_fast, sma_slow, macd_hist, prev_rsi=None, prev_macd_hist=None):
     above_slow  = price > sma_slow
-    rsi_rising  = prev_rsi        is None or rsi       > prev_rsi
-    macd_rising = prev_macd_hist  is None or macd_hist > prev_macd_hist
-    if rsi < 40 and above_slow and rsi_rising and macd_rising:
+    rsi_rising  = prev_rsi       is None or rsi       > prev_rsi
+    macd_rising = prev_macd_hist is None or macd_hist > prev_macd_hist
+    rsi_falling = prev_rsi is not None and rsi < prev_rsi
+    # BUY: oversold + both momentum recovery signals (no SMA200 required —
+    # corrections happen in all trends; RSI+MACD confirmation filters quality)
+    if rsi < 40 and rsi_rising and macd_rising:
         return "BUY"
-    elif rsi > 75 or not above_slow:
+    # SELL: overbought OR in a downtrend AND actively still falling (not recovering)
+    elif rsi > 75 or (not above_slow and rsi_falling):
         return "SELL"
     return "HOLD"
 
@@ -626,9 +630,9 @@ def render_indicator_breakdown(data):
     if sig == "BUY":
         verdict = (
             f"**This stock looks like a buying opportunity right now.** "
-            f"It has pulled back to an oversold level — like a quality product on sale — "
-            f"while the long-term trend is still pointing upward. "
-            f"This combination often marks a good entry point."
+            f"It has been heavily sold off and is now showing early recovery signs — "
+            f"RSI is turning up from oversold levels and momentum is shifting from bearish to bullish. "
+            f"This combination often marks a good entry point for a bounce."
         )
     elif sig == "SELL":
         if rsi > 75 and not above_slow:
