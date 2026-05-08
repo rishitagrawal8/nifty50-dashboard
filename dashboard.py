@@ -120,9 +120,11 @@ def calc_macd(close):
     return line, signal, hist
 
 
-def get_signal(price, rsi, sma_fast, sma_slow, macd_hist):
-    above_slow = price > sma_slow
-    if rsi < 35 and above_slow:
+def get_signal(price, rsi, sma_fast, sma_slow, macd_hist, prev_rsi=None, prev_macd_hist=None):
+    above_slow  = price > sma_slow
+    rsi_rising  = prev_rsi        is None or rsi       > prev_rsi
+    macd_rising = prev_macd_hist  is None or macd_hist > prev_macd_hist
+    if rsi < 40 and above_slow and rsi_rising and macd_rising:
         return "BUY"
     elif rsi > 75 or not above_slow:
         return "SELL"
@@ -225,10 +227,12 @@ def backtest_single(ticker, tf_key):
             if pd.isna(sf) or pd.isna(sw) or pd.isna(rsi) or pd.isna(atr) or pd.isna(mh):
                 continue
 
-            price_i = float(close.iloc[i])
-            high_i  = float(df["High"].iloc[i])
-            low_i   = float(df["Low"].iloc[i])
-            cur_sig = get_signal(price_i, float(rsi), float(sf), float(sw), float(mh))
+            price_i  = float(close.iloc[i])
+            high_i   = float(df["High"].iloc[i])
+            low_i    = float(df["Low"].iloc[i])
+            prev_rsi = float(rsi_s.iloc[i - 1]) if i > start_i and not pd.isna(rsi_s.iloc[i - 1]) else None
+            prev_mh  = float(hist_s.iloc[i - 1]) if i > start_i and not pd.isna(hist_s.iloc[i - 1]) else None
+            cur_sig  = get_signal(price_i, float(rsi), float(sf), float(sw), float(mh), prev_rsi, prev_mh)
 
             # Exit check before entry
             if in_trade and i > entry_idx:
@@ -326,9 +330,11 @@ def fetch_single(ticker, cfg):
         sma_slow = round(close.rolling(slow).mean().iloc[-1], 2)
         rsi_s    = calc_rsi(close)
         rsi      = round(float(rsi_s.iloc[-1]), 1)
+        prev_rsi = round(float(rsi_s.iloc[-2]), 1) if rsi_s.dropna().shape[0] >= 2 else None
         ml, sl, mh = calc_macd(close)
         macd_hist  = round(float(mh.iloc[-1]), 2)
-        signal     = get_signal(price, rsi, sma_fast, sma_slow, macd_hist)
+        prev_mh    = round(float(mh.iloc[-2]), 2) if mh.dropna().shape[0] >= 2 else None
+        signal     = get_signal(price, rsi, sma_fast, sma_slow, macd_hist, prev_rsi, prev_mh)
 
         atr_s  = calc_atr(df)
         atr    = round(float(atr_s.iloc[-1]), 2)
@@ -474,9 +480,9 @@ def build_chart(data):
 
     # ── RSI panel ─────────────────────────────────────────────────────────────
     fig.add_hrect(y0=75, y1=100, fillcolor="rgba(231,76,60,0.08)", line_width=0, row=3, col=1)
-    fig.add_hrect(y0=0,  y1=35,  fillcolor="rgba(46,204,113,0.08)", line_width=0, row=3, col=1)
+    fig.add_hrect(y0=0,  y1=40,  fillcolor="rgba(46,204,113,0.08)", line_width=0, row=3, col=1)
     fig.add_hline(y=75, line_dash="dash", line_color="#e74c3c", line_width=1, row=3, col=1)
-    fig.add_hline(y=35, line_dash="dash", line_color="#2ecc71", line_width=1, row=3, col=1)
+    fig.add_hline(y=40, line_dash="dash", line_color="#2ecc71", line_width=1, row=3, col=1)
     fig.add_trace(go.Scatter(
         x=df.index, y=df["RSI"],
         name="RSI", line=dict(color="#1a6faf", width=1.5),
@@ -658,13 +664,13 @@ def render_indicator_breakdown(data):
     st.markdown("#### 📊 Breaking it down")
 
     # RSI
-    if rsi < 35:
+    if rsi < 40:
         rsi_text = (
             f"**Momentum (RSI {rsi}) — Oversold 🟢**  \n"
-            f"The RSI measures how fast a stock is moving. At {rsi}, it's below 35, which means "
+            f"The RSI measures how fast a stock is moving. At {rsi}, it's below 40, which means "
             f"the stock has been sold off heavily and is now in 'oversold' territory. "
             f"Think of it like a spring compressed too far down — it often bounces back. "
-            f"This is typically a buying signal."
+            f"A BUY signal also requires the RSI to be rising (recovery confirmed) and MACD momentum turning up."
         )
     elif rsi > 75:
         rsi_text = (
@@ -676,7 +682,7 @@ def render_indicator_breakdown(data):
     else:
         rsi_text = (
             f"**Momentum (RSI {rsi}) — Neutral 🟡**  \n"
-            f"At {rsi}, the RSI sits comfortably between 35 and 75 — the 'neutral zone'. "
+            f"At {rsi}, the RSI sits comfortably between 40 and 75 — the 'neutral zone'. "
             f"There's no extreme buying or selling pressure. "
             f"The stock is simply moving normally, with neither bulls nor bears in full control."
         )
@@ -1057,7 +1063,7 @@ def render_backtest(results, tf_key):
         names = ", ".join(r["ticker"].replace(".NS","") for r in skipped)
         st.caption(
             f"⚠️ {len(skipped)} stocks had fewer than 3 historical BUY signals and are unscored "
-            f"({names}). This means RSI < 35 + price above SMA {cfg['sma_slow']} was rarely triggered for them."
+            f"({names}). This means RSI < 40 rising + MACD rising + price above SMA {cfg['sma_slow']} was rarely triggered for them."
         )
 
 
