@@ -117,13 +117,19 @@ def render_auth_sidebar():
         return  # silently skip if Supabase not configured
 
     with st.sidebar:
+        st.markdown("## 👤 Account")
+        st.divider()
         if "sb_session" in st.session_state:
             email = st.session_state.get("sb_user_email", "")
-            st.success(f"Logged in as **{email}**")
+            st.success(f"✓ {email}", icon="🟢")
+            st.caption("Your portfolio is saved to the cloud.")
+            st.write("")
             if st.button("Log out", use_container_width=True):
                 _sb_sign_out()
                 st.rerun()
         else:
+            st.caption("Log in to save your portfolio across sessions.")
+            st.write("")
             st.markdown("### Sign in / Register")
             tab_login, tab_signup = st.tabs(["Log in", "Sign up"])
 
@@ -163,46 +169,121 @@ st.set_page_config(
     page_title="NIFTY 50 Dashboard",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="auto",
+    initial_sidebar_state="expanded",
 )
 
 st.markdown("""
 <style>
-  /* Light background */
-  .stApp { background-color: #ffffff; }
-  section[data-testid="stSidebar"] { background-color: #f5f5f5; }
+  /* ── Base ── */
+  .stApp { background-color: #f0f4f8 !important; }
+  .main .block-container { padding-top: 1.5rem; }
 
-  /* All text black */
-  .stApp, .stApp p, .stApp span, .stApp div,
-  .stApp label, .stApp li, .stMarkdown { color: #111111 !important; }
-
-  /* Metric cards */
-  div[data-testid="metric-container"] {
-    background: #f8f9fa;
-    border: 1px solid #dee2e6;
-    border-radius: 8px;
-    padding: 12px 16px;
+  /* ── Sidebar ── */
+  section[data-testid="stSidebar"] {
+    background-color: #1a2942 !important;
+    border-right: none;
   }
-  div[data-testid="metric-container"] * { color: #111111 !important; }
+  section[data-testid="stSidebar"] * { color: #e8edf5 !important; }
+  section[data-testid="stSidebar"] h3 { color: #ffffff !important; font-size: 1rem; }
+  section[data-testid="stSidebar"] .stButton > button {
+    background: #2563eb; color: #fff !important; border: none;
+    border-radius: 6px; width: 100%; padding: 0.5rem;
+  }
+  section[data-testid="stSidebar"] .stButton > button:hover { background: #1d4ed8; }
+  section[data-testid="stSidebar"] .stTextInput input {
+    background: #243552 !important; color: #e8edf5 !important;
+    border: 1px solid #3a5070 !important; border-radius: 6px;
+  }
+  section[data-testid="stSidebar"] .stTabs [data-baseweb="tab"] { color: #a0b3cc !important; }
+  section[data-testid="stSidebar"] .stTabs [aria-selected="true"] { color: #fff !important; }
+  section[data-testid="stSidebar"] [data-testid="stAlert"] { background: #1e3a5a !important; }
 
-  /* Header */
-  h1, h2, h3 { color: #111111 !important; letter-spacing: -0.5px; }
+  /* ── Cards / white panels ── */
+  div[data-testid="metric-container"] {
+    background: #ffffff !important;
+    border: 1px solid #d1dce8;
+    border-radius: 10px;
+    padding: 14px 18px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  div[data-testid="metric-container"] label { color: #5a7a99 !important; font-size: 0.78rem; }
+  div[data-testid="metric-container"] [data-testid="stMetricValue"] { color: #111827 !important; font-weight: 600; }
+  div[data-testid="metric-container"] [data-testid="stMetricDelta"] { font-size: 0.78rem; }
 
-  /* Caption */
-  .stCaptionContainer, .stCaptionContainer p { color: #555555 !important; }
+  /* ── Typography ── */
+  h1, h2, h3 { color: #111827 !important; letter-spacing: -0.5px; }
+  .stApp p, .stApp span, .stApp div, .stApp label, .stApp li { color: #1f2937; }
+  .stCaptionContainer, .stCaptionContainer p { color: #6b7280 !important; }
 
-  /* Dataframe tweaks */
-  .stDataFrame { border-radius: 8px; overflow: hidden; }
+  /* ── Buttons ── */
+  .stButton > button {
+    border-radius: 8px;
+    border: 1px solid #d1dce8;
+    background: #ffffff;
+    color: #1a2942 !important;
+    font-weight: 500;
+    transition: all 0.15s;
+  }
+  .stButton > button:hover { background: #f0f4f8; border-color: #a0b3cc; }
+  .stButton > button[kind="primary"] {
+    background: #1a6faf !important; color: #fff !important;
+    border: none;
+  }
+  .stButton > button[kind="primary"]:hover { background: #155f99 !important; }
 
-  /* Info box */
-  div[data-testid="stInfo"] { background: #e8f4fd; color: #111111 !important; }
-  div[data-testid="stInfo"] * { color: #111111 !important; }
+  /* ── Tabs ── */
+  .stTabs [data-baseweb="tab-list"] {
+    background: #ffffff;
+    border-radius: 10px 10px 0 0;
+    border-bottom: 2px solid #d1dce8;
+    padding: 0 8px;
+  }
+  .stTabs [data-baseweb="tab"] {
+    color: #6b7280 !important; font-weight: 500;
+    padding: 10px 18px;
+  }
+  .stTabs [aria-selected="true"] { color: #1a6faf !important; font-weight: 600; }
 
-  /* Expander */
-  details { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; }
-  summary { color: #111111 !important; }
+  /* ── Dataframe ── */
+  .stDataFrame {
+    border-radius: 10px; overflow: hidden;
+    border: 1px solid #d1dce8;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    background: #ffffff;
+  }
 
-  /* Hide streamlit branding */
+  /* ── Search input ── */
+  .stTextInput input {
+    background: #ffffff !important;
+    border: 1px solid #d1dce8 !important;
+    border-radius: 8px !important;
+    color: #111827 !important;
+  }
+
+  /* ── Info / alerts ── */
+  div[data-testid="stInfo"] {
+    background: #eff6ff !important; border-left: 4px solid #3b82f6;
+    border-radius: 8px;
+  }
+  div[data-testid="stInfo"] * { color: #1e40af !important; }
+  div[data-testid="stSuccess"] { border-radius: 8px; }
+
+  /* ── Expander ── */
+  details {
+    background: #ffffff !important;
+    border: 1px solid #d1dce8 !important;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  summary { color: #111827 !important; font-weight: 500; }
+
+  /* ── Divider ── */
+  hr { border-color: #d1dce8 !important; }
+
+  /* ── Radio buttons ── */
+  .stRadio label { color: #374151 !important; }
+
+  /* ── Hide branding ── */
   #MainMenu { visibility: hidden; }
   footer    { visibility: hidden; }
 </style>
