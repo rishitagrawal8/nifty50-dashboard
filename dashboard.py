@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NIFTY 50 Web Dashboard — Streamlit + Plotly"""
+"""NIFTY 50 Web Dashboard — Streamlit + Plotly + Supabase Auth"""
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -12,6 +12,151 @@ from plotly.subplots import make_subplots
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from streamlit_autorefresh import st_autorefresh
+import json
+
+# ── Supabase client ───────────────────────────────────────────────────────────
+
+def _get_supabase():
+    """Return a Supabase client, or None if credentials are missing."""
+    try:
+        from supabase import create_client
+        url = st.secrets.get("SUPABASE_URL", "")
+        key = st.secrets.get("SUPABASE_KEY", "")
+        if not url or not key or "YOUR-PROJECT-ID" in url:
+            return None
+        return create_client(url, key)
+    except Exception:
+        return None
+
+
+def _sb_sign_up(email: str, password: str):
+    """Register a new user. Returns (user, error_message)."""
+    sb = _get_supabase()
+    if sb is None:
+        return None, "Supabase not configured"
+    try:
+        res = sb.auth.sign_up({"email": email, "password": password})
+        if res.user:
+            return res.user, None
+        return None, "Sign-up failed — check your credentials"
+    except Exception as e:
+        return None, str(e)
+
+
+def _sb_sign_in(email: str, password: str):
+    """Sign in an existing user. Returns (session, error_message)."""
+    sb = _get_supabase()
+    if sb is None:
+        return None, "Supabase not configured"
+    try:
+        res = sb.auth.sign_in_with_password({"email": email, "password": password})
+        if res.session:
+            return res.session, None
+        return None, "Login failed — wrong email or password"
+    except Exception as e:
+        msg = str(e)
+        if "Invalid login credentials" in msg:
+            msg = "Wrong email or password. Please try again."
+        return None, msg
+
+
+def _sb_sign_out():
+    sb = _get_supabase()
+    if sb:
+        try:
+            sb.auth.sign_out()
+        except Exception:
+            pass
+    for k in ("sb_session", "sb_user_email", "portfolio"):
+        st.session_state.pop(k, None)
+
+
+def _sb_load_portfolio(access_token: str, user_id: str):
+    """Load holdings from Supabase. Returns list of dicts or empty list."""
+    sb = _get_supabase()
+    if sb is None:
+        return []
+    try:
+        sb.postgrest.auth(access_token)
+        res = (
+            sb.table("portfolios")
+            .select("holdings")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if res.data:
+            return res.data[0]["holdings"] or []
+    except Exception:
+        pass
+    return []
+
+
+def _sb_save_portfolio(access_token: str, user_id: str, holdings: list):
+    """Upsert portfolio holdings to Supabase."""
+    sb = _get_supabase()
+    if sb is None:
+        return False
+    try:
+        sb.postgrest.auth(access_token)
+        sb.table("portfolios").upsert(
+            {"user_id": user_id, "holdings": holdings, "updated_at": "now()"},
+            on_conflict="user_id",
+        ).execute()
+        return True
+    except Exception:
+        return False
+
+
+# ── Auth UI ───────────────────────────────────────────────────────────────────
+
+def render_auth_sidebar():
+    """Show login/logout control in the sidebar."""
+    sb = _get_supabase()
+    if sb is None:
+        return  # silently skip if Supabase not configured
+
+    with st.sidebar:
+        if "sb_session" in st.session_state:
+            email = st.session_state.get("sb_user_email", "")
+            st.success(f"Logged in as **{email}**")
+            if st.button("Log out", use_container_width=True):
+                _sb_sign_out()
+                st.rerun()
+        else:
+            st.markdown("### Sign in / Register")
+            tab_login, tab_signup = st.tabs(["Log in", "Sign up"])
+
+            with tab_login:
+                with st.form("login_form"):
+                    em = st.text_input("Email")
+                    pw = st.text_input("Password", type="password")
+                    if st.form_submit_button("Log in", use_container_width=True):
+                        session, err = _sb_sign_in(em, pw)
+                        if session:
+                            st.session_state.sb_session = {
+                                "access_token": session.access_token,
+                                "user_id": session.user.id,
+                            }
+                            st.session_state.sb_user_email = em
+                            st.session_state.pop("portfolio_loaded", None)
+                            st.session_state.pop("portfolio", None)
+                            st.rerun()
+                        else:
+                            st.error(err)
+
+            with tab_signup:
+                with st.form("signup_form"):
+                    em2 = st.text_input("Email", key="su_em")
+                    pw2 = st.text_input("Password", type="password", key="su_pw")
+                    st.caption("Password must be at least 6 characters.")
+                    if st.form_submit_button("Create account", use_container_width=True):
+                        user, err = _sb_sign_up(em2, pw2)
+                        if user:
+                            st.success("Account created! Please log in.")
+                        else:
+                            st.error(err)
+
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -878,11 +1023,39 @@ def render_dashboard(results, live_prices=None):
 def render_portfolio(results):
     lookup = {d["name"]: d for d in results}
 
+    # ── Auth state ────────────────────────────────────────────────────────────
+    sb_session = st.session_state.get("sb_session")
+    logged_in  = sb_session is not None
+    supabase_ok = _get_supabase() is not None
+
     st.subheader("Enter your holdings")
+
+    if supabase_ok and not logged_in:
+        st.info(
+            "**Sign in** (sidebar) to save and restore your portfolio across sessions. "
+            "Or use as a guest — your holdings will be stored locally for this session only.",
+            icon="ℹ️",
+        )
+    elif logged_in:
+        st.success(
+            f"Portfolio synced to your account. Any changes you save are stored in the cloud.",
+            icon="☁️",
+        )
+
     st.caption("Add the stocks you own, how many shares, and your average buy price. Buy price is optional but enables P&L tracking.")
 
-    # Init session state
-    if "portfolio" not in st.session_state:
+    # ── Load from Supabase on first view (once per session) ───────────────────
+    if "portfolio_loaded" not in st.session_state:
+        st.session_state.portfolio_loaded = True
+        if logged_in:
+            raw = _sb_load_portfolio(
+                sb_session["access_token"], sb_session["user_id"]
+            )
+            if raw:
+                st.session_state.portfolio = pd.DataFrame(raw)
+
+    # Init session state with default if still empty
+    if "portfolio" not in st.session_state or st.session_state.portfolio is None:
         st.session_state.portfolio = pd.DataFrame(
             [{"Ticker": "RELIANCE", "Shares": 10.0, "Avg Buy Price (₹)": 0.0}]
         )
@@ -906,9 +1079,30 @@ def render_portfolio(results):
         hide_index=True,
     )
 
-    if st.button("📊 Analyse Portfolio", type="primary", use_container_width=False):
+    btn_col, save_col = st.columns([2, 1])
+    with btn_col:
+        analyse_clicked = st.button("📊 Analyse Portfolio", type="primary")
+    with save_col:
+        save_clicked = st.button(
+            "💾 Save to Cloud",
+            disabled=not logged_in,
+            help="Log in to save your portfolio" if not logged_in else "Save to your account",
+        )
+
+    if analyse_clicked:
         st.session_state.portfolio = edited
         st.session_state.show_analysis = True
+
+    if save_clicked and logged_in:
+        st.session_state.portfolio = edited
+        holdings = edited.dropna(subset=["Ticker"]).to_dict("records")
+        ok = _sb_save_portfolio(
+            sb_session["access_token"], sb_session["user_id"], holdings
+        )
+        if ok:
+            st.success("Portfolio saved to your account!", icon="✅")
+        else:
+            st.error("Failed to save — please try again.")
 
     if not st.session_state.get("show_analysis"):
         return
@@ -1118,6 +1312,8 @@ def render_backtest(results, tf_key):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
+    render_auth_sidebar()
+
     col_title, col_refresh = st.columns([5, 1])
     with col_title:
         st.title("📈 NIFTY 50 Dashboard")
