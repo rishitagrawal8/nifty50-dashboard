@@ -10,7 +10,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+from streamlit_autorefresh import st_autorefresh
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -373,6 +374,44 @@ def fetch_single(ticker, cfg):
         return None
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_live_prices():
+    """Fast per-ticker price refresh using fast_info (30-second cache)."""
+    def _get(ticker):
+        try:
+            fi = yf.Ticker(ticker).fast_info
+            price = fi.last_price
+            open_ = fi.open
+            if price is None or open_ is None or open_ == 0:
+                return ticker, None
+            return ticker, {
+                "live_price":  round(float(price), 2),
+                "open":        round(float(open_),  2),
+                "day_high":    round(float(fi.day_high or price), 2),
+                "day_low":     round(float(fi.day_low  or price), 2),
+                "day_chg_pct": round((float(price) - float(open_)) / float(open_) * 100, 2),
+            }
+        except Exception:
+            return ticker, None
+
+    out = {}
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        for ticker, data in pool.map(_get, NIFTY50):
+            if data:
+                out[ticker] = data
+    return out
+
+
+def _is_market_open():
+    """NSE hours: 09:15–15:30 IST, Mon–Fri."""
+    ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    if ist.weekday() >= 5:
+        return False
+    open_t  = ist.replace(hour=9,  minute=15, second=0, microsecond=0)
+    close_t = ist.replace(hour=15, minute=30, second=0, microsecond=0)
+    return open_t <= ist <= close_t
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_all(timeframe_key: str):
     cfg     = TIMEFRAMES[timeframe_key]
@@ -528,20 +567,24 @@ def build_chart(data):
 # ── Build display table ───────────────────────────────────────────────────────
 SIGNAL_LABEL = {"BUY": "🟢 BUY", "SELL": "🔴 SELL", "HOLD": "🟡 HOLD"}
 
-def build_table(results):
+def build_table(results, live_prices=None):
     rows = []
     for d in results:
+        lp   = (live_prices or {}).get(d["ticker"], {})
+        live = lp.get("live_price", d["price"])
+        chg  = lp.get("day_chg_pct")
         rows.append({
-            "Ticker":    d["name"],
-            "Price (₹)": d["price"],
-            "RSI":       d["rsi"],
+            "Ticker":      d["name"],
+            "Live ₹":      live,
+            "Today %":     chg,
+            "RSI":         d["rsi"],
             "vs Slow SMA": d["vs_slow"],
-            "MACD Hist": d["macd_hist"],
-            "Stop Loss": d["stop"],
-            "SL %":      d["stop_pct"],
-            "Target":    d["target"],
-            "Tgt %":     d["target_pct"],
-            "Signal":    SIGNAL_LABEL[d["signal"]],
+            "MACD Hist":   d["macd_hist"],
+            "Stop Loss":   d["stop"],
+            "SL %":        d["stop_pct"],
+            "Target":      d["target"],
+            "Tgt %":       d["target_pct"],
+            "Signal":      SIGNAL_LABEL[d["signal"]],
         })
     return pd.DataFrame(rows)
 
@@ -775,7 +818,7 @@ def render_indicator_breakdown(data):
         st.caption("No recent news found for this stock.")
 
 
-def render_dashboard(results):
+def render_dashboard(results, live_prices=None):
     counts = {"BUY": 0, "HOLD": 0, "SELL": 0}
     for d in results:
         counts[d["signal"]] += 1
@@ -786,7 +829,8 @@ def render_dashboard(results):
     m3.metric("🟡 HOLD", counts["HOLD"])
     m4.metric("🔴 SELL", counts["SELL"])
 
-    st.caption(f"Last updated: {datetime.now().strftime('%d %b %Y, %H:%M:%S')}  •  Data cached for 15 min  •  Click any row to view chart")
+    market_status = "🟢 Market Open — prices updating every 30s" if _is_market_open() else "🔴 Market Closed — showing last traded prices"
+    st.caption(f"{market_status}  •  Indicators cached 15 min  •  Click any row to view chart")
     st.divider()
 
     # Search bar
@@ -796,7 +840,7 @@ def render_dashboard(results):
         st.warning(f"No stocks matched '{search}'.")
         return
 
-    df_table = build_table(filtered)
+    df_table = build_table(filtered, live_prices)
     event = st.dataframe(
         df_table,
         use_container_width=True,
@@ -805,7 +849,8 @@ def render_dashboard(results):
         selection_mode="single-row",
         column_config={
             "Ticker":      st.column_config.TextColumn("Ticker", width="small"),
-            "Price (₹)":   st.column_config.NumberColumn("Price (₹)", format="₹%.2f"),
+            "Live ₹":      st.column_config.NumberColumn("Live ₹", format="₹%.2f"),
+            "Today %":     st.column_config.NumberColumn("Today %", format="%.2f%%"),
             "RSI":         st.column_config.NumberColumn("RSI", format="%.1f"),
             "vs Slow SMA": st.column_config.NumberColumn("vs Slow SMA", format="%.1f%%"),
             "MACD Hist":   st.column_config.NumberColumn("MACD Hist", format="%.2f"),
@@ -1092,6 +1137,10 @@ def main():
     )
     st.caption(f"**{tf_key}** — {TIMEFRAMES[tf_key]['desc']}")
 
+    # Auto-refresh every 30s during market hours, every 5 min otherwise
+    refresh_ms = 30_000 if _is_market_open() else 300_000
+    st_autorefresh(interval=refresh_ms, key="live_price_refresh")
+
     with st.spinner("Fetching live data for all 50 stocks …"):
         results = fetch_all(tf_key)
 
@@ -1104,10 +1153,12 @@ def main():
         st.error("Failed to fetch data. Please check your internet connection and try again.")
         return
 
+    live_prices = fetch_live_prices()
+
     tab1, tab2, tab3 = st.tabs(["📊 Market Dashboard", "💼 My Portfolio", "🔬 Backtest"])
 
     with tab1:
-        render_dashboard(results)
+        render_dashboard(results, live_prices)
 
     with tab2:
         render_portfolio(results)
