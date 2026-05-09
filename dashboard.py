@@ -194,12 +194,29 @@ st.markdown("""
   }
   section[data-testid="stSidebar"] .stButton > button:hover { background: #1d4ed8; }
   section[data-testid="stSidebar"] .stTextInput input {
-    background: #243552 !important; color: #e8edf5 !important;
-    border: 1px solid #3a5070 !important; border-radius: 6px;
+    background: #ffffff !important; color: #111827 !important;
+    border: 1px solid #6b8cae !important; border-radius: 6px;
+  }
+  section[data-testid="stSidebar"] .stTextInput label { color: #c8d8e8 !important; font-size: 0.85rem; }
+  section[data-testid="stSidebar"] .stTabs [data-baseweb="tab-list"] {
+    background: #243552 !important; border-radius: 8px; border: none;
   }
   section[data-testid="stSidebar"] .stTabs [data-baseweb="tab"] { color: #a0b3cc !important; }
-  section[data-testid="stSidebar"] .stTabs [aria-selected="true"] { color: #fff !important; }
+  section[data-testid="stSidebar"] .stTabs [aria-selected="true"] {
+    color: #fff !important; background: #1a6faf !important; border-radius: 6px;
+  }
   section[data-testid="stSidebar"] [data-testid="stAlert"] { background: #1e3a5a !important; }
+  section[data-testid="stSidebar"] .stForm { background: transparent !important; }
+  section[data-testid="stSidebar"] [data-testid="stFormSubmitButton"] button {
+    background: #2563eb !important; color: #fff !important;
+    border: none !important; width: 100% !important; border-radius: 6px !important;
+    margin-top: 0.5rem !important;
+  }
+  section[data-testid="stSidebar"] [data-testid="stFormSubmitButton"] button:hover {
+    background: #1d4ed8 !important;
+  }
+  section[data-testid="stSidebar"] small,
+  section[data-testid="stSidebar"] .stCaption { color: #8aacc8 !important; }
 
   /* ── Cards / white panels ── */
   div[data-testid="metric-container"] {
